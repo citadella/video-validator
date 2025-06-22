@@ -11,7 +11,6 @@ import time
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-here'
 
-# Configure logging for debugging
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -26,8 +25,8 @@ MEDIA_PATHS = {
 VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv']
 
 CHECKPOINTS = {
-    'movie': [60, 600, 1800],   # 1, 10, 30 minutes
-    'tv': [60, 300, 600]        # 1, 5, 10 minutes
+    'movie': [60, 600, 1800],
+    'tv': [60, 300, 600]
 }
 
 repair_progress = {
@@ -59,9 +58,25 @@ def init_db():
             duration REAL,
             file_mtime REAL,
             file_size INTEGER,
-            last_checked TIMESTAMP
+            last_checked TIMESTAMP,
+            repair_attempted TIMESTAMP,
+            repair_success BOOLEAN
         )
     ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS app_settings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            schedule_type TEXT NOT NULL DEFAULT 'weekly',
+            day_of_week TEXT,
+            occurrence TEXT,
+            run_time TIME NOT NULL DEFAULT '02:00'
+        )
+    ''')
+    if conn.execute('SELECT COUNT(*) FROM app_settings').fetchone()[0] == 0:
+        conn.execute('''
+            INSERT INTO app_settings (schedule_type, run_time)
+            VALUES ('weekly', '02:00')
+        ''')
     conn.commit()
     conn.close()
 
@@ -71,7 +86,6 @@ def validate_video(filepath, media_type):
     checkpoints = CHECKPOINTS[media_type]
     errors = []
     check_results = {f'check_{t//60}m': 0 for t in [60, 300, 600, 1800]}
-
     try:
         duration_cmd = [
             'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
@@ -80,7 +94,6 @@ def validate_video(filepath, media_type):
         duration = float(subprocess.check_output(duration_cmd).decode().strip())
     except Exception as e:
         return 'failed', f'[{filepath}] Could not get duration: {e}', 0, check_results
-
     for seconds in checkpoints:
         checkpoint_name = f'check_{seconds//60}m'
         if duration > seconds:
@@ -103,7 +116,6 @@ def validate_video(filepath, media_type):
                 check_results[checkpoint_name] = 0
         else:
             check_results[checkpoint_name] = -1
-
     status = "passed" if not errors else "failed"
     return status, '\n'.join(errors), duration, check_results
 
@@ -113,44 +125,44 @@ def should_validate_file(filepath, db_row):
     try:
         current_mtime = os.path.getmtime(filepath)
         current_size = os.path.getsize(filepath)
-        if (current_mtime != db_row['file_mtime'] or 
-            current_size != db_row['file_size']):
+        if (current_mtime != db_row['file_mtime'] or current_size != db_row['file_size']):
             return True
     except Exception:
         pass
     return False
 
 def repair_video_file(filepath):
-    """Attempt to repair a corrupted video file using multiple FFmpeg strategies.
-    If all repair strategies fail, delete the backup."""
     app.logger.info(f"Starting repair for: {filepath}")
-
     if not os.path.exists(filepath):
         app.logger.error(f"File not found: {filepath}")
         return "failed", "File not found"
-
     if not os.access(filepath, os.R_OK):
         app.logger.error(f"Cannot read file: {filepath}")
         return "failed", "Cannot read file"
-
     dir_path = os.path.dirname(filepath)
     if not os.access(dir_path, os.W_OK):
         app.logger.error(f"Cannot write to directory: {dir_path}")
         return "failed", "Cannot write to directory"
-
     backup_dir = os.path.join(dir_path, '.video_backups')
     filename = os.path.basename(filepath)
     backup_path = os.path.join(backup_dir, f"{filename}.backup")
 
+    # Mark repair attempt in DB
+    conn = get_db_connection()
+    conn.execute('''
+        UPDATE validation_results
+        SET repair_attempted = ?, repair_success = NULL
+        WHERE filepath = ?
+    ''', (datetime.now(), filepath))
+    conn.commit()
+    conn.close()
+
     try:
         os.makedirs(backup_dir, mode=0o755, exist_ok=True)
         app.logger.info(f"Created backup directory: {backup_dir}")
-
         if not os.path.exists(backup_path):
             shutil.copy2(filepath, backup_path)
             app.logger.info(f"Created backup: {backup_path}")
-
-        # Check FFmpeg
         try:
             subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
@@ -171,6 +183,7 @@ def repair_video_file(filepath):
             if os.path.exists(temp_path1) and os.path.getsize(temp_path1) > 0:
                 shutil.move(temp_path1, filepath)
                 app.logger.info(f"Repaired using container rebuild: {filepath}")
+                _update_repair_status(filepath, True)
                 return "success", "Container rebuild successful"
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path1):
@@ -191,6 +204,7 @@ def repair_video_file(filepath):
             if os.path.exists(temp_path2) and os.path.getsize(temp_path2) > 0:
                 shutil.move(temp_path2, filepath)
                 app.logger.info(f"Repaired using error recovery: {filepath}")
+                _update_repair_status(filepath, True)
                 return "success", "Error recovery successful"
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path2):
@@ -212,6 +226,7 @@ def repair_video_file(filepath):
             if os.path.exists(temp_path3) and os.path.getsize(temp_path3) > 0:
                 shutil.move(temp_path3, filepath)
                 app.logger.info(f"Repaired using re-encoding: {filepath}")
+                _update_repair_status(filepath, True)
                 return "success", "Re-encoding successful"
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path3):
@@ -226,19 +241,29 @@ def repair_video_file(filepath):
                 app.logger.error(f"Could not delete backup after failed repair: {e}")
         else:
             app.logger.info(f"No backup found to delete after failed repair: {backup_path}")
-
+        _update_repair_status(filepath, False)
         return "failed", "All repair strategies failed"
 
     except Exception as e:
         app.logger.error(f"Repair exception for {filepath}: {e}")
-        # Also delete backup if repair fails due to exception
         if os.path.exists(backup_path):
             try:
                 os.remove(backup_path)
                 app.logger.info(f"Deleted backup after failed repair: {backup_path}")
             except Exception as e2:
                 app.logger.error(f"Could not delete backup after failed repair: {e2}")
+        _update_repair_status(filepath, False)
         return "failed", f"Exception: {e}"
+
+def _update_repair_status(filepath, success):
+    conn = get_db_connection()
+    conn.execute('''
+        UPDATE validation_results
+        SET repair_success = ?, repair_attempted = ?
+        WHERE filepath = ?
+    ''', (1 if success else 0, datetime.now(), filepath))
+    conn.commit()
+    conn.close()
 
 def repair_all_failed_files():
     global repair_progress
@@ -314,7 +339,6 @@ def results():
     page = request.args.get('page', 1, type=int)
     per_page = 200
     offset = (page - 1) * per_page
-
     conn = get_db_connection()
     base_query = 'SELECT * FROM validation_results WHERE media_type = ?'
     count_query = 'SELECT COUNT(*) FROM validation_results WHERE media_type = ?'
@@ -445,37 +469,23 @@ def start_repair():
 def get_repair_progress():
     return jsonify(repair_progress)
 
-@app.route('/debug-repair')
-def debug_repair():
-    diagnostics = {}
-    diagnostics['repair_progress'] = repair_progress
-    for media_type, path in MEDIA_PATHS.items():
-        try:
-            test_file = os.path.join(path, '.write_test')
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-            diagnostics[f'{media_type}_writable'] = True
-        except Exception as e:
-            diagnostics[f'{media_type}_writable'] = False
-            diagnostics[f'{media_type}_error'] = str(e)
-    try:
-        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, timeout=5)
-        diagnostics['ffmpeg_available'] = result.returncode == 0
-    except Exception as e:
-        diagnostics['ffmpeg_available'] = False
-        diagnostics['ffmpeg_error'] = str(e)
-    conn = get_db_connection()
-    failed_count = conn.execute(
-        'SELECT COUNT(*) FROM validation_results WHERE status = "failed"'
-    ).fetchone()[0]
-    conn.close()
-    diagnostics['failed_files_count'] = failed_count
-    return jsonify(diagnostics)
-
-@app.route('/settings')
+@app.route('/settings', methods=['GET', 'POST'])
 def settings():
-    return render_template('settings.html')
+    conn = get_db_connection()
+    settings = conn.execute('SELECT * FROM app_settings').fetchone()
+    if request.method == 'POST':
+        schedule_type = request.form['schedule_type']
+        day_of_week = request.form.get('day_of_week')
+        occurrence = request.form.get('occurrence')
+        run_time = request.form['run_time']
+        conn.execute('''
+            UPDATE app_settings
+            SET schedule_type = ?, day_of_week = ?, occurrence = ?, run_time = ?
+        ''', (schedule_type, day_of_week, occurrence, run_time))
+        conn.commit()
+        return redirect(url_for('settings'))
+    conn.close()
+    return render_template('settings.html', settings=settings)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
