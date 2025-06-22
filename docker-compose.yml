@@ -1,0 +1,14 @@
+services:
+  video-validator:
+    container_name: video-validator
+    build: .
+    ports:
+      - "8099:5000"
+    volumes:
+      - /mnt/user/media/movies:/media/movies:ro
+      - /mnt/user/media/tv:/media/tv:ro
+      - /mnt/user/appdata/video-validator/data:/app/data  # Full host path
+    environment:
+      - DATABASE_PATH=/app/data/video_validation.db
+    restart: unless-stopped
+

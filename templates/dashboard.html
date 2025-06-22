@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <form action="{{ url_for('start_scan') }}" method="POST" id="scan-form">
+        <button type="submit" class="btn btn-primary btn-lg mb-4" id="scan-btn">
+            Start Scan
+        </button>
+    </form>
+
+    <!-- Media Type Tabs -->
+    <ul class="nav nav-tabs" id="mediaTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="movies-tab" data-bs-toggle="tab" data-bs-target="#movies" type="button" role="tab">
+                Movies
+            </button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tv-tab" data-bs-toggle="tab" data-bs-target="#tv" type="button" role="tab">
+                TV Shows
+            </button>
+        </li>
+    </ul>
+
+    <div class="tab-content mt-3">
+        <!-- Movies Tab -->
+        <div class="tab-pane fade show active" id="movies" role="tabpanel" aria-labelledby="movies-tab">
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card text-white bg-primary mb-3">
+                        <div class="card-header">Total Movies</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['movie']['total'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-success mb-3">
+                        <div class="card-header">Passed</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['movie']['passed'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-danger mb-3">
+                        <div class="card-header">Failed</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['movie']['failed'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-3">
+                <div class="card-header">Movie Validation Checkpoints (Failed Files)</div>
+                <div class="card-body">
+                    <canvas id="movieChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- TV Tab -->
+        <div class="tab-pane fade" id="tv" role="tabpanel" aria-labelledby="tv-tab">
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="card text-white bg-info mb-3">
+                        <div class="card-header">Total TV Episodes</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['tv']['total'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-success mb-3">
+                        <div class="card-header">Passed</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['tv']['passed'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="card text-white bg-danger mb-3">
+                        <div class="card-header">Failed</div>
+                        <div class="card-body">
+                            <h1 class="card-title">{{ stats['tv']['failed'] }}</h1>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="card mt-3">
+                <div class="card-header">TV Validation Checkpoints (Failed Files)</div>
+                <div class="card-body">
+                    <canvas id="tvChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+document.getElementById('scan-form').addEventListener('submit', function(e) {
+    var btn = document.getElementById('scan-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Scanning...';
+});
+
+// Movie chart
+const movieCtx = document.getElementById('movieChart').getContext('2d');
+new Chart(movieCtx, {
+    type: 'bar',
+    data: {
+        labels: ['1m', '10m', '30m'],
+        datasets: [{
+            label: 'Failed Checks',
+            data: [
+                {{ stats['movie']['checkpoints']['1m'] }},
+                {{ stats['movie']['checkpoints']['10m'] }},
+                {{ stats['movie']['checkpoints']['30m'] }}
+            ],
+            backgroundColor: ['#ff6384', '#36a2eb', '#ffce56']
+        }]
+    },
+    options: {
+        scales: { y: { beginAtZero: true } }
+    }
+});
+
+// TV chart
+const tvCtx = document.getElementById('tvChart').getContext('2d');
+new Chart(tvCtx, {
+    type: 'bar',
+    data: {
+        labels: ['1m', '5m', '10m'],
+        datasets: [{
+            label: 'Failed Checks',
+            data: [
+                {{ stats['tv']['checkpoints']['1m'] }},
+                {{ stats['tv']['checkpoints']['5m'] }},
+                {{ stats['tv']['checkpoints']['10m'] }}
+            ],
+            backgroundColor: ['#4bc0c0', '#9966ff', '#ff9f40']
+        }]
+    },
+    options: {
+        scales: { y: { beginAtZero: true } }
+    }
+});
+</script>
+{% endblock %}

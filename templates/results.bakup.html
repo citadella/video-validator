@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container mt-4">
+    <h2>Validation Results</h2>
+    <!-- Media type tabs -->
+    <div class="btn-group mb-3">
+        <a href="{{ url_for('results', media='movie', status=current_filter) }}" class="btn btn-primary {% if media_type == 'movie' %}active{% endif %}">Movies</a>
+        <a href="{{ url_for('results', media='tv', status=current_filter) }}" class="btn btn-primary {% if media_type == 'tv' %}active{% endif %}">TV Shows</a>
+    </div>
+    <!-- Status filter -->
+    <div class="btn-group mb-3 ms-2">
+        <a href="{{ url_for('results', media=media_type, status='all') }}" class="btn btn-outline-secondary {% if current_filter == 'all' %}active{% endif %}">All</a>
+        <a href="{{ url_for('results', media=media_type, status='failed') }}" class="btn btn-outline-danger {% if current_filter == 'failed' %}active{% endif %}">Failed Only</a>
+    </div>
+    <!-- Results table -->
+    <div class="table-responsive">
+        <table class="table table-striped table-bordered align-middle">
+            <thead class="table-dark">
+                <tr>
+                    <th>File Path</th>
+                    <th>Status</th>
+                    <th>Errors</th>
+                    <th>Last Checked</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for result in results %}
+                <tr class="{% if result.status == 'failed' %}table-danger{% elif result.status == 'passed' %}table-success{% endif %}">
+                    <td style="word-break:break-all;">{{ result.filepath }}</td>
+                    <td>
+                        <span class="badge {% if result.status == 'failed' %}bg-danger{% else %}bg-success{% endif %}">
+                            {{ result.status|capitalize }}
+                        </span>
+                    </td>
+                    <td>
+                        {% if result.errors %}
+                            <pre style="white-space:pre-wrap;">{{ result.errors }}</pre>
+                        {% else %}
+                            <span class="text-muted">None</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if result.last_checked %}
+                            {{ result.last_checked }}
+                        {% else %}
+                            <span class="text-muted">Never</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4" class="text-center text-muted">No results found.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}
