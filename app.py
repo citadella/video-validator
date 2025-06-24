@@ -44,6 +44,7 @@ def get_db_connection():
 
 def init_db():
     conn = get_db_connection()
+    # Validation results table
     conn.execute('''
         CREATE TABLE IF NOT EXISTS validation_results (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +64,7 @@ def init_db():
             repair_success BOOLEAN
         )
     ''')
+    # Settings table
     conn.execute('''
         CREATE TABLE IF NOT EXISTS app_settings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -72,6 +74,17 @@ def init_db():
             run_time TIME NOT NULL DEFAULT '02:00'
         )
     ''')
+    # Scan history table
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS scan_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_time TIMESTAMP NOT NULL,
+            scan_type TEXT NOT NULL,
+            libraries TEXT NOT NULL,
+            total_files_scanned INTEGER NOT NULL
+        )
+    ''')
+    # Initialize settings if empty
     if conn.execute('SELECT COUNT(*) FROM app_settings').fetchone()[0] == 0:
         conn.execute('''
             INSERT INTO app_settings (schedule_type, run_time)
@@ -146,7 +159,6 @@ def repair_video_file(filepath):
     backup_dir = os.path.join(dir_path, '.video_backups')
     filename = os.path.basename(filepath)
     backup_path = os.path.join(backup_dir, f"{filename}.backup")
-
     # Mark repair attempt in DB
     conn = get_db_connection()
     conn.execute('''
@@ -156,7 +168,6 @@ def repair_video_file(filepath):
     ''', (datetime.now(), filepath))
     conn.commit()
     conn.close()
-
     try:
         os.makedirs(backup_dir, mode=0o755, exist_ok=True)
         app.logger.info(f"Created backup directory: {backup_dir}")
@@ -168,7 +179,6 @@ def repair_video_file(filepath):
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             app.logger.error(f"FFmpeg not available: {e}")
             return "failed", "FFmpeg not available"
-
         # Strategy 1: Container rebuild
         temp_path1 = filepath + ".repair1.tmp"
         container_cmd = [
@@ -188,7 +198,6 @@ def repair_video_file(filepath):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path1):
                 os.remove(temp_path1)
-
         # Strategy 2: Error recovery
         temp_path2 = filepath + ".repair2.tmp"
         recovery_cmd = [
@@ -209,7 +218,6 @@ def repair_video_file(filepath):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path2):
                 os.remove(temp_path2)
-
         # Strategy 3: Re-encoding
         temp_path3 = filepath + ".repair3.tmp"
         reencode_cmd = [
@@ -231,7 +239,6 @@ def repair_video_file(filepath):
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             if os.path.exists(temp_path3):
                 os.remove(temp_path3)
-
         # If all repair strategies failed, delete the backup
         if os.path.exists(backup_path):
             try:
@@ -243,7 +250,6 @@ def repair_video_file(filepath):
             app.logger.info(f"No backup found to delete after failed repair: {backup_path}")
         _update_repair_status(filepath, False)
         return "failed", "All repair strategies failed"
-
     except Exception as e:
         app.logger.error(f"Repair exception for {filepath}: {e}")
         if os.path.exists(backup_path):
@@ -259,9 +265,9 @@ def _update_repair_status(filepath, success):
     conn = get_db_connection()
     conn.execute('''
         UPDATE validation_results
-        SET repair_success = ?, repair_attempted = ?
+        SET repair_success = ?
         WHERE filepath = ?
-    ''', (1 if success else 0, datetime.now(), filepath))
+    ''', (1 if success else 0, filepath))
     conn.commit()
     conn.close()
 
@@ -332,6 +338,106 @@ def repair_all_failed_files():
             repair_progress['status'] = 'completed'
             app.logger.info("Repair thread completed")
 
+def _run_scan(media_type=None, full_rescan=False):
+    conn = get_db_connection()
+    db_files = {row['filepath']: row for row in conn.execute('SELECT * FROM validation_results')}
+    existing_files = set()
+    media_types_to_scan = [media_type] if media_type else MEDIA_PATHS.keys()
+    files_scanned_count = 0
+    for m_type in media_types_to_scan:
+        base_path = MEDIA_PATHS[m_type]
+        for root, dirs, files in os.walk(base_path):
+            for file in files:
+                if os.path.splitext(file)[1].lower() in VIDEO_EXTENSIONS:
+                    filepath = os.path.join(root, file)
+                    existing_files.add(filepath)
+                    db_row = db_files.get(filepath)
+                    if full_rescan or should_validate_file(filepath, db_row):
+                        files_scanned_count += 1
+                        try:
+                            file_mtime = os.path.getmtime(filepath)
+                            file_size = os.path.getsize(filepath)
+                        except Exception as e:
+                            app.logger.error(f"Error accessing {filepath}: {e}")
+                            continue
+                        status, errors, duration, checks = validate_video(filepath, m_type)
+                        conn.execute('''
+                            INSERT OR REPLACE INTO validation_results
+                            (media_type, filepath, status, errors, duration, 
+                             file_mtime, file_size, last_checked,
+                             check_1m, check_5m, check_10m, check_30m)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ''', (
+                            m_type, filepath, status, errors, duration,
+                            file_mtime, file_size, datetime.now(),
+                            checks.get('check_1m', 0), checks.get('check_5m', 0),
+                            checks.get('check_10m', 0), checks.get('check_30m', 0)
+                        ))
+                        conn.commit()
+                        app.logger.info(f"Revalidated {'FAILED' if status=='failed' else 'PASSED'}: {filepath}")
+    # Calculate repaired and fixed files
+    repaired_count = conn.execute('''
+        SELECT COUNT(*) FROM validation_results
+        WHERE repair_success = 1
+        AND last_checked >= (SELECT MAX(scan_time) FROM scan_history)
+    ''').fetchone()[0]
+    
+    fixed_count = conn.execute('''
+        SELECT COUNT(*) FROM validation_results
+        WHERE status = 'passed'
+        AND last_checked >= (SELECT MAX(scan_time) FROM scan_history)
+        AND filepath IN (
+            SELECT filepath FROM validation_results 
+            WHERE status = 'failed' 
+            AND last_checked < (SELECT MAX(scan_time) FROM scan_history)
+        )
+    ''').fetchone()[0]
+    
+    # Update scan history with new counts
+    conn.execute('''
+        UPDATE scan_history
+        SET repaired_files = ?, fixed_files = ?
+        WHERE scan_time = (SELECT MAX(scan_time) FROM scan_history)
+    ''', (repaired_count, fixed_count))
+    conn.commit()
+    # Cleanup deleted files
+    deleted_count = 0
+    if existing_files:
+        placeholders = ','.join('?' for _ in existing_files)
+        cursor = conn.execute(f'''
+            DELETE FROM validation_results 
+            WHERE filepath NOT IN ({placeholders})
+        ''', tuple(existing_files))
+        conn.commit()
+        deleted_count = cursor.rowcount
+    app.logger.info(f"Removed {deleted_count} deleted files from database")
+    # Record scan history
+    scan_type = "Full" if full_rescan else "Incremental"
+    libraries = ", ".join([m.capitalize() for m in media_types_to_scan])
+    conn.execute('''
+        INSERT INTO scan_history (scan_time, scan_type, libraries, total_files_scanned)
+        VALUES (?, ?, ?, ?)
+    ''', (datetime.now(), scan_type, libraries, files_scanned_count))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('dashboard'))
+
+@app.route('/start-full-scan', methods=['POST'])
+def start_full_scan():
+    return _run_scan(media_type=None, full_rescan=False)
+
+@app.route('/start-movies-scan', methods=['POST'])
+def start_movies_scan():
+    return _run_scan(media_type='movie', full_rescan=False)
+
+@app.route('/start-tv-scan', methods=['POST'])
+def start_tv_scan():
+    return _run_scan(media_type='tv', full_rescan=False)
+
+@app.route('/rescan-all', methods=['POST'])
+def rescan_all():
+    return _run_scan(media_type=None, full_rescan=True)
+
 @app.route('/results')
 def results():
     media_type = request.args.get('media', 'movie')
@@ -397,53 +503,6 @@ def dashboard():
     conn.close()
     return render_template('dashboard.html', stats=stats)
 
-@app.route('/start-scan', methods=['POST'])
-def start_scan():
-    conn = get_db_connection()
-    db_files = {row['filepath']: row for row in conn.execute('SELECT * FROM validation_results')}
-    existing_files = set()
-    for media_type, base_path in MEDIA_PATHS.items():
-        for root, dirs, files in os.walk(base_path):
-            for file in files:
-                if os.path.splitext(file)[1].lower() in VIDEO_EXTENSIONS:
-                    filepath = os.path.join(root, file)
-                    existing_files.add(filepath)
-                    db_row = db_files.get(filepath)
-                    if should_validate_file(filepath, db_row):
-                        try:
-                            file_mtime = os.path.getmtime(filepath)
-                            file_size = os.path.getsize(filepath)
-                        except Exception as e:
-                            app.logger.error(f"Error accessing {filepath}: {e}")
-                            continue
-                        status, errors, duration, checks = validate_video(filepath, media_type)
-                        conn.execute('''
-                            INSERT OR REPLACE INTO validation_results
-                            (media_type, filepath, status, errors, duration, 
-                             file_mtime, file_size, last_checked,
-                             check_1m, check_5m, check_10m, check_30m)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ''', (
-                            media_type, filepath, status, errors, duration,
-                            file_mtime, file_size, datetime.now(),
-                            checks.get('check_1m', 0), checks.get('check_5m', 0),
-                            checks.get('check_10m', 0), checks.get('check_30m', 0)
-                        ))
-                        conn.commit()
-                        app.logger.info(f"Revalidated {'FAILED' if status=='failed' else 'PASSED'}: {filepath}")
-    deleted_count = 0
-    if existing_files:
-        placeholders = ','.join('?' for _ in existing_files)
-        cursor = conn.execute(f'''
-            DELETE FROM validation_results 
-            WHERE filepath NOT IN ({placeholders})
-        ''', tuple(existing_files))
-        conn.commit()
-        deleted_count = cursor.rowcount
-    app.logger.info(f"Removed {deleted_count} deleted files from database")
-    conn.close()
-    return redirect(url_for('dashboard'))
-
 @app.route('/start-repair', methods=['POST'])
 def start_repair():
     global repair_progress
@@ -486,6 +545,26 @@ def settings():
         return redirect(url_for('settings'))
     conn.close()
     return render_template('settings.html', settings=settings)
+
+@app.route('/scan-history')
+def scan_history():
+    conn = get_db_connection()
+    history = conn.execute('''
+        SELECT * FROM scan_history 
+        ORDER BY scan_time DESC
+    ''').fetchall()
+    conn.close()
+    return render_template('scan_history.html', history=history)
+
+# Add to app.py temporarily
+@app.route('/debug-templates')
+def debug_templates():
+    import os
+    return {
+        'templates': os.listdir(os.path.join(app.root_path, 'templates')),
+        'cwd': os.getcwd()
+    }
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
