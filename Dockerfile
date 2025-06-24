@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application files
 COPY app.py .
-COPY templates/ ./templates/
+COPY templates/ /app/templates/
 COPY static/ ./static/
 
 # Set Unraid user/group (nobody:users)

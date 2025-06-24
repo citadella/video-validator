@@ -1,14 +1,18 @@
+version: '3.8'
+
 services:
   video-validator:
-    container_name: video-validator
     build: .
+    container_name: video-validator
+    restart: unless-stopped
     ports:
       - "8099:5000"
     volumes:
-      - /mnt/user/media/movies:/media/movies:ro
-      - /mnt/user/media/tv:/media/tv:ro
-      - /mnt/user/appdata/video-validator/data:/app/data  # Full host path
+      - /mnt/user/media/movies:/media/movies:rw
+      - /mnt/user/media/tv:/media/tv:rw
+      - /mnt/user/appdata/video-validator/data:/app/data:rw
+    user: "99:100"
     environment:
-      - DATABASE_PATH=/app/data/video_validation.db
-    restart: unless-stopped
+      - PYTHONUNBUFFERED=1
+      - TZ=Europe/Budapest
 

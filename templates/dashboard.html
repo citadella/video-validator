@@ -1,12 +1,24 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="container mt-4">
-    <form action="{{ url_for('start_scan') }}" method="POST" id="scan-form">
-        <button type="submit" class="btn btn-primary btn-lg mb-4" id="scan-btn">
-            Start Scan
-        </button>
-    </form>
-
+    <div class="d-flex justify-content-between mb-4">
+        <!-- Left: Incremental Rescan -->
+        <div>
+            <form action="{{ url_for('start_full_scan') }}" method="POST">
+                <button type="submit" class="btn btn-primary btn-lg">
+                    Incremental Rescan
+                </button>
+            </form>
+        </div>
+        <!-- Right: Rescan All -->
+        <div>
+            <form action="{{ url_for('rescan_all') }}" method="POST">
+                <button type="submit" class="btn btn-warning btn-lg">
+                    <i class="fas fa-sync-alt"></i> Rescan All
+                </button>
+            </form>
+        </div>
+    </div>
     <!-- Media Type Tabs -->
     <ul class="nav nav-tabs" id="mediaTabs" role="tablist">
         <li class="nav-item" role="presentation">
@@ -20,10 +32,17 @@
             </button>
         </li>
     </ul>
-
     <div class="tab-content mt-3">
         <!-- Movies Tab -->
         <div class="tab-pane fade show active" id="movies" role="tabpanel" aria-labelledby="movies-tab">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="mb-0">Movie Validation</h3>
+                <form action="{{ url_for('start_movies_scan') }}" method="POST">
+                    <button type="submit" class="btn btn-outline-primary">
+                        <i class="fas fa-play-circle"></i> Scan Movies
+                    </button>
+                </form>
+            </div>
             <div class="row">
                 <div class="col-md-4">
                     <div class="card text-white bg-primary mb-3">
@@ -57,9 +76,16 @@
                 </div>
             </div>
         </div>
-
         <!-- TV Tab -->
         <div class="tab-pane fade" id="tv" role="tabpanel" aria-labelledby="tv-tab">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="mb-0">TV Show Validation</h3>
+                <form action="{{ url_for('start_tv_scan') }}" method="POST">
+                    <button type="submit" class="btn btn-outline-primary">
+                        <i class="fas fa-play-circle"></i> Scan TV Shows
+                    </button>
+                </form>
+            </div>
             <div class="row">
                 <div class="col-md-4">
                     <div class="card text-white bg-info mb-3">
@@ -100,13 +126,6 @@
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script>
-document.getElementById('scan-form').addEventListener('submit', function(e) {
-    var btn = document.getElementById('scan-btn');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Scanning...';
-});
-
-// Movie chart
 const movieCtx = document.getElementById('movieChart').getContext('2d');
 new Chart(movieCtx, {
     type: 'bar',
@@ -127,7 +146,6 @@ new Chart(movieCtx, {
     }
 });
 
-// TV chart
 const tvCtx = document.getElementById('tvChart').getContext('2d');
 new Chart(tvCtx, {
     type: 'bar',
